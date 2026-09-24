@@ -1,0 +1,24 @@
+Here's a summary of this whole session:
+
+## 1. Pro subscription badges (Home + Profile)
+- Added gold ring + crown badge on avatars, gated behind `subscriptionManager.isPro`.
+- Iterated from "crown only" (option 2) to full "ring + crown + PRO chip" (option 3) on both screens.
+- **Files touched:** `ProfileScreenView.swift`, `HomeScreenView.swift` — both needed `@EnvironmentObject var subscriptionManager: SubscriptionManager` added (already injected app-wide).
+
+## 2. Camera scan → auto-redirect to animal detail screen
+- Goal: when the camera identifies a pet, auto-navigate into the real `AnimalDetailView` (reused from `AnimalLibraryView`), not a separate results screen.
+- Built `ClassifierLabelMap` to translate raw ML labels → `AnimalData.all`'s exact `name` strings.
+- Wired `ScanResultView` with `.navigationDestination(item: $matchedAnimal)` for the auto-redirect.
+- **Bug #1 — Camera tab dead-end:** the Camera *tab* in `HomeScreenView` had an empty `{ image in }` closure (a pre-existing leftover), so scanning via the tab bar did nothing, even though the Home screen's separate camera button worked. Fixed by wiring the tab's closure to the same `capturedImage`/`showScanResult` state.
+- **Bug #2 — UI freeze on scan:** `AnimalClassifier.classify(_:)` called `VNImageRequestHandler.perform(_:)` (a blocking call) directly on the main thread from `.onAppear`, freezing the entire UI (confirmed via two videos: blank white/black screen matching system background, no spinner, no toolbar). Fixed by wrapping the whole `classify` body in `DispatchQueue.global(qos: .userInitiated).async { ... }`.
+
+## 3. Growth graphs inline on MyAnimals cards
+- Added an expandable "View growth graphs" section to each pet card in `MyAnimals`, reusing the same `WeightEntry`/`HeightEntry` `@FetchRequest` pattern as `PetDetailsView`.
+- Refactored the per-pet row into a new `PetCompanionCard` view (own `@FetchRequest`s, own `isExpanded` state) while keeping Start/Pause/Stop timer controls untouched.
+- Chevron still opens full `PetDetailsView`; new toggle expands compact inline charts instead.
+
+## 4. Live Activity controls not working from Dynamic Island / Lock Screen
+- **Bug #1 — Buttons unresponsive:** `PausePetTimeIntent`, `ResumePetTimeIntent`, `StopPetTimeIntent` conformed to plain `AppIntent` instead of `LiveActivityIntent`, so tapping them from the Dynamic Island/Lock Screen didn't reliably execute. Fixed by switching conformance to `LiveActivityIntent` (one-word change per intent, in `AppIntent.swift`).
+- **Bug #2 — Live Activity stopped appearing at all (Simulator):** `PetTimeActivityManager.start(...)` had a single combined `guard` with no logging, so if `ActivityAuthorizationInfo().areActivitiesEnabled` was `false` (likely the Simulator's Live Activities toggle being off under Settings → Dr. Paw), it failed completely silently — no console output, no UI, no error. Fixed by splitting the guard into two, each with a distinct `print`, so the exact cause now surfaces in the console. Diagnosis confirmed it was a Simulator-testing constraint (no Apple Dev account on that Xcode install), not a code regression from the Bug #1 fix — you were told to check the console output after rebuilding to confirm which of the three logged cases you hit.
+
+That last one's still awaiting your test result — let me know what prints in the console next time you run it.
