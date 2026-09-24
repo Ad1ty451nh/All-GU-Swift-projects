@@ -1,0 +1,2442 @@
+//
+//  HomeScreenView.swift
+//  Dr.Paw
+//
+//  Created by Adityasinh on 09/07/26.
+//  Updated: now owns the tab bar directly (Liquid Glass style, iOS 26+)
+//  plus the raised center camera button and the scan flow.
+//
+//  UI PASS: restyled to the new neutral appBackground/appSurface/appBrand
+//  palette (see ColorExtension.swift) instead of the old hardcoded hex
+//  colors. Nothing functional changed — same TabView, same sheet/
+//  fullScreenCover wiring, same location + clinic pipeline.
+//
+
+import SwiftUI
+import UIKit
+ 
+enum AppTab {
+    case home, growth, library, profile
+}
+ 
+struct HomeScreenView: View {
+    @EnvironmentObject var session: UserSession
+    @EnvironmentObject var deepLinkRouter: DeepLinkRouter
+    @EnvironmentObject var subscriptionManager: SubscriptionManager
+    @StateObject private var locationManager = LocationManager()
+    @StateObject private var clinicViewModel = NearbyVetClinicViewModel()
+ 
+    @State private var selectedTab: AppTab = .home
+    @State private var showCamera = false
+    @State private var capturedImage: UIImage?
+    @State private var showScanResult = false
+    @Namespace private var glassNamespace
+
+    // Controls how many clinics are rendered at once — "Load More" adds 5 more each tap
+    @State private var visibleClinicCount = 5
+
+    // ACTIVE NAVBAR COLOR: change this value to update the selected tab icon,
+    // label, and its highlighted pill background.
+    // Swapped from the old hardcoded orange to the brand accent so it now
+    // tracks light/dark mode automatically.
+    private let activeTabColor = Color.appAccent
+    private let proGoldColor = Color(red: 0.83, green: 0.68, blue: 0.21)
+ 
+    private var greetingName: String {
+        session.nickname.isEmpty ? "Pet Parent" : session.nickname
+    }
+ 
+    var body: some View {
+        
+        TabView {
+            homeContent
+                .tabItem {
+                    Image(systemName: "house")
+                    Text("Home")
+                }
+
+            MyAnimals()
+                .tabItem {
+                    Image(systemName: "pawprint")
+                    Text("My Animals")
+                }
+
+            CameraCaptureView { image in
+                guard let image else { return }
+                capturedImage = image
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    showScanResult = true
+                }
+            }
+            .tabItem {
+                Image(systemName: "camera")
+                Text("Camera")
+            }
+
+            AnimalLibraryView()
+                .tabItem {
+                    Image(systemName: "books.vertical")
+                    Text("Library")
+                }
+
+            SettingsView()
+                .tabItem {
+                    Image(systemName: "gearshape")
+                    Text("Settings")
+                }
+            }
+        .tint(activeTabColor)
+        .ignoresSafeArea(edges: .bottom)
+        .sheet(item: $deepLinkRouter.destination) { destination in
+            switch destination {
+            case .foodWalk:
+                FoodWalkTrackerView()
+            case .medical:
+                MedicalReminderView()
+            }
+        }
+        .fullScreenCover(isPresented: $showCamera) {
+            CameraCaptureView { image in
+                showCamera = false
+                guard let image else { return }
+                capturedImage = image
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    showScanResult = true
+                }
+            }
+        }
+        .fullScreenCover(isPresented: $showScanResult) {
+            if let capturedImage {
+                ScanResultView(image: capturedImage)
+            }
+        }
+    }
+    
+ 
+    // MARK: - Home Tab Content (your original screen)
+ 
+    private var homeContent: some View {
+        NavigationStack {
+            ZStack {
+                homeBackground
+ 
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 22) {
+                        heroHeader
+                        petSpaceView
+                        refreshButton
+                        locationStatusView
+                        clinicListView
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 16)
+                    .padding(.bottom, 110) // clear the floating tab bar
+                }
+            }
+            .navigationBarBackButtonHidden(true)
+            .onAppear {
+                locationManager.requestLocationAccess()
+            }
+            .onReceive(locationManager.$currentLocation.compactMap { $0 }) { newLocation in
+                Task {
+                    await clinicViewModel.fetchClinics(near: newLocation)
+                }
+            }
+        }
+    }
+
+    // MARK: - Background
+    // Same soft-blurred-circle treatment used on AnimalLibraryView, so every
+    // top-level tab now shares one visual identity instead of each screen
+    // inventing its own background.
+
+    private var homeBackground: some View {
+        ZStack {
+            Color.appBackground
+                .ignoresSafeArea()
+
+            Circle()
+                .fill(Color.appBrand.opacity(0.16))
+                .frame(width: 260, height: 260)
+                .blur(radius: 35)
+                .offset(x: -140, y: -300)
+
+            Circle()
+                .fill(Color.appAccent.opacity(0.18))
+                .frame(width: 260, height: 260)
+                .blur(radius: 35)
+                .offset(x: 150, y: 380)
+        }
+    }
+
+    // MARK: - Hero header
+    // Replaces the old plain "Hello, Name" row with a gradient hero card,
+    // matching the hero used in AnimalLibraryView / PaywallView so the app
+    // reads as one design system rather than three different ones.
+
+    private var heroHeader: some View {
+        ZStack(alignment: .bottomLeading) {
+            LinearGradient(
+                colors: [
+                    Color.appBrand,
+                    Color.appAccent,
+                    Color.appBrand.opacity(0.75)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            Image(systemName: "pawprint.fill")
+                .font(.system(size: 120, weight: .bold))
+                .foregroundStyle(.white.opacity(0.13))
+                .rotationEffect(.degrees(-18))
+                .offset(x: 130, y: -10)
+                .shadow(radius: 7)
+
+            HStack(alignment: .bottom) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("WELCOME BACK")
+                        .font(.caption.weight(.bold))
+                        .tracking(1.4)
+                        .foregroundStyle(.white.opacity(0.75))
+                    Spacer()
+                    HStack(spacing: 8) {
+                        Text("Hello, \(greetingName)")
+                            .font(.system(size: 26, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+
+                        if subscriptionManager.isPro {
+                            proChip
+                        }
+                    }
+
+                    Text("Find animal doctors near you")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.85))
+                    Spacer()
+                }
+
+                Spacer()
+                VStack{
+                    NavigationLink(destination: ProfileScreenView()) {
+                        homeProfileAvatar
+                    }
+                    Spacer()
+                }
+            }
+            .padding(20)
+        }
+        .frame(height: 160)
+        .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
+        .shadow(color: Color.appBrand.opacity(0.28), radius: 16, y: 9)
+    }
+
+    // MARK: - Pro Badges
+
+    private var proChip: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "crown.fill")
+                .font(.system(size: 9, weight: .bold))
+
+            Text("PRO")
+                .font(.system(size: 11, weight: .bold))
+                .tracking(0.4)
+        }
+        .foregroundStyle(proGoldColor)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.white)
+        .clipShape(Capsule())
+    }
+
+    private var homeProfileAvatar: some View {
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if let image = UIImage(data: session.profileImageData), !session.profileImageData.isEmpty {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        
+                } else {
+                    Image(systemName: "person.crop.circle.fill")
+                        .resizable()
+                        .scaledToFit()
+                        .foregroundStyle(.white)
+                        .padding(8)
+                        .background(.white.opacity(0.18))
+                }
+            }
+            .frame(width: 50, height: 50)
+            .clipShape(Circle())
+            .shadow(color: Color(.systemBackground).opacity(0.5), radius: 8)
+            .overlay(
+                Circle()
+                    .stroke(
+                        subscriptionManager.isPro ? proGoldColor : .white.opacity(0.85),
+                        lineWidth: 2
+                    )
+            )
+
+            if subscriptionManager.isPro {
+                Image(systemName: "crown.fill")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(4)
+                    .background(proGoldColor)
+                    .clipShape(Circle())
+                    .overlay(
+                        Circle().stroke(Color.appBackground, lineWidth: 1.5)
+                    )
+                    .offset(x: 4, y: -4)
+            }
+        }
+    }
+
+    // MARK: - Pet Space (4-card feature grid)
+
+    private var petSpaceView: some View {
+        VStack(alignment: .leading, spacing: 14) {
+
+            Label("PET SPACE", systemImage: "square.grid.2x2.fill")
+                .font(.caption.weight(.bold))
+                .tracking(1.2)
+                .foregroundStyle(Color.appAccent)
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
+
+                PetSpaceCard(icon: "scalemass.fill", title: "Weight & Height", tint: .blue) {
+                    WeightHeightTrackerView()
+                }
+
+                PetSpaceCard(icon: "cross.case.fill", title: "Medical Reminder", tint: .orange) {
+                    MedicalReminderView()
+                }
+
+                PetSpaceCard(icon: "figure.walk", title: "Food & Walk", tint: .green) {
+                    FoodWalkTrackerView()
+                }
+
+                PetSpaceCard(icon: "pawprint.fill", title: "Pets List", tint: .purple) {
+                    PetsListView()
+                }
+
+            }
+
+        }
+    }
+
+    private var refreshButton: some View {
+        Button {
+            locationManager.refreshLocation()
+        } label: {
+            Label("Refresh nearby clinics", systemImage: "location.circle.fill")
+                .font(.headline)
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 56)
+                .background(Color.appBrandGradient)
+                .clipShape(Capsule())
+        }
+        .shadow(color: Color.appBrand.opacity(0.22), radius: 12, x: 0, y: 8)
+    }
+ 
+    @ViewBuilder
+    private var locationStatusView: some View {
+        if let error = locationManager.locationError ?? clinicViewModel.errorMessage {
+            Text(error)
+                .font(.subheadline)
+                .foregroundStyle(Color.appTextPrimary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+                .background(Color.appSurface)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        } else if clinicViewModel.isLoading {
+            HStack(spacing: 12) {
+                ProgressView()
+                    .tint(Color.appAccent)
+ 
+                Text("Finding nearby vet clinics...")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.appTextSecondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .background(Color.appSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+    }
+ 
+    @ViewBuilder
+    private var clinicListView: some View {
+        if clinicViewModel.clinics.isEmpty && clinicViewModel.isLoading == false {
+            VStack(spacing: 14) {
+                Image(systemName: "map")
+                    .font(.system(size: 42))
+                    .foregroundStyle(Color.appAccent)
+ 
+                Text("Nearby clinics will appear here")
+                    .font(.headline)
+                    .foregroundStyle(Color.appTextPrimary)
+ 
+                Text("Allow location access so Dr. Paws can fetch animal doctors around you.")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.appTextSecondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(28)
+            .background(Color.appSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        } else {
+            VStack(alignment: .leading, spacing: 14) {
+                Label("NEARBY ANIMAL DOCTORS", systemImage: "cross.case.fill")
+                    .font(.caption.weight(.bold))
+                    .tracking(1.2)
+                    .foregroundStyle(Color.appAccent)
+ 
+                ForEach(clinicViewModel.clinics.prefix(visibleClinicCount)) { clinic in
+                    VetClinicCardView(clinic: clinic)
+                }
+
+                if visibleClinicCount < clinicViewModel.clinics.count {
+                    Button {
+                        visibleClinicCount += 5
+                    } label: {
+                        Text("Load More")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Color.appBrand)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(Color.appSurface)
+                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Pet Space feature card
+// Restyled to match AnimalCardView's card language: appSurface fill, a
+// hairline border, and a colored icon badge instead of a flat tint badge.
+
+struct PetSpaceCard<Destination: View>: View {
+
+    let icon: String
+    let title: String
+    let tint: Color
+    @ViewBuilder let destination: () -> Destination
+
+    var body: some View {
+
+        NavigationLink(destination: destination()) {
+
+            VStack(alignment: .leading, spacing: 12) {
+
+                ZStack {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(tint.opacity(0.15))
+                        .frame(width: 48, height: 48)
+
+                    Image(systemName: icon)
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(tint)
+                }
+
+                Text(title)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.appTextPrimary)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Spacer(minLength: 0)
+
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, minHeight: 130, alignment: .topLeading)
+            .background(Color.appSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(tint.opacity(0.16), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.05), radius: 10, x: 0, y: 6)
+
+        }
+        .buttonStyle(.plain)
+
+    }
+}
+#Preview {
+    HomeScreenView()
+        .environmentObject(UserSession())
+        .environmentObject(DeepLinkRouter())
+        .environmentObject(PetStore(context: PersistenceController.shared.container.viewContext))
+        .environmentObject(WeightHeightStore(context: PersistenceController.shared.container.viewContext))
+        .environmentObject(SubscriptionManager())
+}
+
+
+
+
+
+
+
+
+
+
+
+<==============================================================================================================================================================================>
+//
+//  AnimalClassifier.swift
+//  Dr.Paw
+//
+//  Created by Adityasinh on 23/09/26.
+//
+//  The full two-stage Vision + CoreML pipeline, ported from CoreMLSandbox.
+//  Reports its result through a completion closure since this is a plain
+//  service now, not View code — no @State to write into directly.
+//
+//  FIX (24/09/26): VNImageRequestHandler.perform(_:) is a synchronous,
+//  blocking call — it was previously being invoked directly on the main
+//  thread from ScanResultView's onAppear, which froze the entire UI for
+//  the whole duration of model loading + inference (no nav bar, no
+//  spinner, nothing could render). Everything now runs on a background
+//  queue; completion still fires on whatever thread the caller dispatches
+//  from, so callers must hop back to main themselves (ScanResultView
+//  already does this).
+
+import Foundation
+import Vision
+import CoreML
+import UIKit
+
+enum AnimalClassifier {
+
+    // Same threshold tuned during sandbox testing (raised from 0.6 to
+    // 0.75 after the face-misclassification edge case).
+    private static let confidenceThreshold: Float = 0.75
+
+    /// Runs the full pipeline on a captured photo.
+    /// completion gives back (rawLabel, confidence). rawLabel is nil when
+    /// nothing could be classified confidently — check that first.
+    /// Runs entirely off the main thread — safe to call from onAppear.
+    static func classify(_ image: UIImage, completion: @escaping (String?, Float) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let ciImage = CIImage(image: image) else {
+                completion(nil, 0)
+                return
+            }
+
+            let config = MLModelConfiguration()
+            config.computeUnits = .all
+
+            // STAGE 1: Species classification (Dogs / Cats / Birds / FarmAnimals / Rodents / Turtles / NotAnAnimal)
+            guard let speciesModel = try? SpeciesClassifier_(configuration: config).model,
+                  let visionSpeciesModel = try? VNCoreMLModel(for: speciesModel) else {
+                completion(nil, 0)
+                return
+            }
+
+            let speciesRequest = VNCoreMLRequest(model: visionSpeciesModel) { request, error in
+                guard error == nil,
+                      let results = request.results as? [VNClassificationObservation],
+                      let topSpecies = results.first else {
+                    completion(nil, 0)
+                    return
+                }
+
+                guard topSpecies.confidence > confidenceThreshold else {
+                    // Not confident enough — treat as "couldn't identify"
+                    completion(nil, topSpecies.confidence)
+                    return
+                }
+
+                switch topSpecies.identifier {
+                case "Dogs":
+                    classifyDogBreed(ciImage: ciImage, config: config, completion: completion)
+                case "Cats":
+                    classifyCatBreed(ciImage: ciImage, config: config, completion: completion)
+                case "Birds":
+                    classifyBird(ciImage: ciImage, config: config, completion: completion)
+                case "FarmAnimals":
+                    classifyFarmAnimal(ciImage: ciImage, config: config, completion: completion)
+                case "Rodents":
+                    classifyRodent(ciImage: ciImage, config: config, completion: completion)
+                case "Turtles":
+                    // No Stage 2 model exists — only one known reptile, report it directly
+                    completion("Turtle", topSpecies.confidence)
+                default:
+                    // NotAnAnimal, or anything unexpected
+                    completion(nil, topSpecies.confidence)
+                }
+            }
+
+            let handler = VNImageRequestHandler(ciImage: ciImage, orientation: .up)
+            do {
+                try handler.perform([speciesRequest])
+            } catch {
+                completion(nil, 0)
+            }
+        }
+    }
+
+    // MARK: - Stage 2 specialists
+    // Each function below is structurally identical to the ones in the
+    // sandbox's ContentView — just pointed at a different model, and
+    // reporting through completion(_:_:) instead of mutating resultText.
+    // These already run on the background queue dispatched from classify(_:),
+    // since VNCoreMLRequest's completion handler fires synchronously within
+    // that same perform() call — no additional dispatching needed here.
+
+    private static func classifyDogBreed(ciImage: CIImage, config: MLModelConfiguration, completion: @escaping (String?, Float) -> Void) {
+        guard let breedModel = try? DogBreedClassifier(configuration: config).model,
+              let visionBreedModel = try? VNCoreMLModel(for: breedModel) else {
+            completion(nil, 0)
+            return
+        }
+        let breedRequest = VNCoreMLRequest(model: visionBreedModel) { request, error in
+            guard error == nil,
+                  let results = request.results as? [VNClassificationObservation],
+                  let topBreed = results.first else {
+                completion(nil, 0)
+                return
+            }
+            completion(topBreed.identifier, topBreed.confidence)
+        }
+        let handler = VNImageRequestHandler(ciImage: ciImage, orientation: .up)
+        try? handler.perform([breedRequest])
+    }
+
+    private static func classifyCatBreed(ciImage: CIImage, config: MLModelConfiguration, completion: @escaping (String?, Float) -> Void) {
+        guard let breedModel = try? CatBreedClassifier(configuration: config).model,
+              let visionBreedModel = try? VNCoreMLModel(for: breedModel) else {
+            completion(nil, 0)
+            return
+        }
+        let breedRequest = VNCoreMLRequest(model: visionBreedModel) { request, error in
+            guard error == nil,
+                  let results = request.results as? [VNClassificationObservation],
+                  let topBreed = results.first else {
+                completion(nil, 0)
+                return
+            }
+            completion(topBreed.identifier, topBreed.confidence)
+        }
+        let handler = VNImageRequestHandler(ciImage: ciImage, orientation: .up)
+        try? handler.perform([breedRequest])
+    }
+
+    private static func classifyBird(ciImage: CIImage, config: MLModelConfiguration, completion: @escaping (String?, Float) -> Void) {
+        guard let birdModel = try? BirdClassifier(configuration: config).model,
+              let visionBirdModel = try? VNCoreMLModel(for: birdModel) else {
+            completion(nil, 0)
+            return
+        }
+        let birdRequest = VNCoreMLRequest(model: visionBirdModel) { request, error in
+            guard error == nil,
+                  let results = request.results as? [VNClassificationObservation],
+                  let topBird = results.first else {
+                completion(nil, 0)
+                return
+            }
+            completion(topBird.identifier, topBird.confidence)
+        }
+        let handler = VNImageRequestHandler(ciImage: ciImage, orientation: .up)
+        try? handler.perform([birdRequest])
+    }
+
+    private static func classifyFarmAnimal(ciImage: CIImage, config: MLModelConfiguration, completion: @escaping (String?, Float) -> Void) {
+        guard let farmModel = try? FarmAnimalClassifier(configuration: config).model,
+              let visionFarmModel = try? VNCoreMLModel(for: farmModel) else {
+            completion(nil, 0)
+            return
+        }
+        let farmRequest = VNCoreMLRequest(model: visionFarmModel) { request, error in
+            guard error == nil,
+                  let results = request.results as? [VNClassificationObservation],
+                  let topFarm = results.first else {
+                completion(nil, 0)
+                return
+            }
+            completion(topFarm.identifier, topFarm.confidence)
+        }
+        let handler = VNImageRequestHandler(ciImage: ciImage, orientation: .up)
+        try? handler.perform([farmRequest])
+    }
+
+    private static func classifyRodent(ciImage: CIImage, config: MLModelConfiguration, completion: @escaping (String?, Float) -> Void) {
+        guard let rodentModel = try? RodentClassifier(configuration: config).model,
+              let visionRodentModel = try? VNCoreMLModel(for: rodentModel) else {
+            completion(nil, 0)
+            return
+        }
+        let rodentRequest = VNCoreMLRequest(model: visionRodentModel) { request, error in
+            guard error == nil,
+                  let results = request.results as? [VNClassificationObservation],
+                  let topRodent = results.first else {
+                completion(nil, 0)
+                return
+            }
+            completion(topRodent.identifier, topRodent.confidence)
+        }
+        let handler = VNImageRequestHandler(ciImage: ciImage, orientation: .up)
+        try? handler.perform([rodentRequest])
+    }
+}
+
+
+
+
+
+
+
+
+<==============================================================================================================================================================================>
+//
+//  PetTimeActivityManager.swift
+//  Dr.Paw
+//
+//  FIX (24/09/26): start(petID:petName:breed:) had a single guard covering
+//  two very different conditions (Live Activities disabled for this app in
+//  Settings, vs. a timer already running / concurrency cap hit) and neither
+//  branch logged anything — a disabled/denied Live Activities permission
+//  failed completely silently, with no console output and no UI feedback,
+//  which is exactly what showed up as "nothing happens" in Simulator
+//  testing. Split the guard so each case prints distinctly.
+//
+
+import ActivityKit
+import Foundation
+
+@MainActor
+final class PetTimeActivityManager: ObservableObject {
+    static let shared = PetTimeActivityManager()
+
+    static let duration: TimeInterval = 30 * 60
+    static let maximumConcurrentActivities = 3
+
+    @Published private(set) var timers: [String: PetTimer] = [:]
+
+    private init() {
+        refresh()
+    }
+
+    func timer(for petID: String) -> PetTimer? {
+        timers[petID]
+    }
+
+    func canStartTimer(for petID: String) -> Bool {
+        timers[petID] == nil && timers.count < Self.maximumConcurrentActivities
+    }
+
+    func start(petID: String, petName: String, breed: String) {
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+            print("⚠️ Live Activities are disabled for this app. Check Settings → Dr. Paw → Live Activities on this device/simulator.")
+            return
+        }
+
+        guard canStartTimer(for: petID) else {
+            print("⚠️ Can't start a timer for \(petID) — one's already running, or the concurrent-activity cap (\(Self.maximumConcurrentActivities)) is reached.")
+            return
+        }
+
+        let start = Date()
+        let end = start.addingTimeInterval(Self.duration)
+        let attributes = PetTimeAttributes(
+            petID: petID,
+            petName: petName,
+            breed: breed.isEmpty ? "Pet time" : breed,
+            startDate: start
+        )
+        let state = PetTimeAttributes.ContentState(
+            endDate: end,
+            isPaused: false,
+            pausedRemaining: 0
+        )
+
+        // Reserve the slot before requesting the system activity, preventing double taps from
+        // creating duplicate activities for the same pet.
+        timers[petID] = PetTimer(petID: petID, activityID: nil, endDate: end, isPaused: false)
+
+        Task {
+            do {
+                let content = ActivityContent(state: state, staleDate: end)
+                let activity = try Activity.request(attributes: attributes, content: content, pushType: nil)
+                timers[petID] = PetTimer(petID: petID, activityID: activity.id, endDate: end, isPaused: false)
+            } catch {
+                timers[petID] = nil
+                print("❌ Failed to start live activity: \(error)")
+            }
+        }
+    }
+
+    func pause(petID: String) {
+        guard let activity = activity(for: petID), !activity.content.state.isPaused else { return }
+
+        Task {
+            let remaining = max(activity.content.state.endDate.timeIntervalSinceNow, 0)
+            let pausedState = PetTimeAttributes.ContentState(
+                endDate: Date(),
+                isPaused: true,
+                pausedRemaining: remaining
+            )
+            await activity.update(ActivityContent(state: pausedState, staleDate: nil))
+            timers[petID] = PetTimer(petID: petID, activityID: activity.id, endDate: pausedState.endDate, isPaused: true)
+        }
+    }
+
+    func resume(petID: String) {
+        guard let activity = activity(for: petID), activity.content.state.isPaused else { return }
+
+        Task {
+            let end = Date().addingTimeInterval(activity.content.state.pausedRemaining)
+            let resumedState = PetTimeAttributes.ContentState(
+                endDate: end,
+                isPaused: false,
+                pausedRemaining: 0
+            )
+            await activity.update(ActivityContent(state: resumedState, staleDate: end))
+            timers[petID] = PetTimer(petID: petID, activityID: activity.id, endDate: end, isPaused: false)
+        }
+    }
+
+    func stop(petID: String) {
+        guard let activity = activity(for: petID) else { return }
+
+        Task {
+            await activity.end(nil, dismissalPolicy: .immediate)
+            timers[petID] = nil
+        }
+    }
+
+    func refresh() {
+        let now = Date()
+        let activities = Activity<PetTimeAttributes>.activities.filter {
+            $0.activityState == .active && ($0.content.state.isPaused || $0.content.state.endDate > now)
+        }
+        timers = Dictionary(
+            uniqueKeysWithValues: activities.map { activity in
+                let state = activity.content.state
+                return (
+                    activity.attributes.petID,
+                    PetTimer(
+                        petID: activity.attributes.petID,
+                        activityID: activity.id,
+                        endDate: state.endDate,
+                        isPaused: state.isPaused
+                    )
+                )
+            }
+        )
+    }
+
+    private func activity(for petID: String) -> Activity<PetTimeAttributes>? {
+        Activity<PetTimeAttributes>.activities.first {
+            $0.attributes.petID == petID &&
+            $0.activityState == .active &&
+            ($0.content.state.isPaused || $0.content.state.endDate > Date())
+        }
+    }
+}
+
+struct PetTimer: Identifiable, Equatable {
+    let petID: String
+    let activityID: String?
+    let endDate: Date
+    let isPaused: Bool
+
+    var id: String { petID }
+}
+
+
+
+
+
+
+
+
+<==============================================================================================================================================================================>
+//
+//  MyAnimals.swift
+//  Dr.Paw
+//
+//  Created by Adityasinh on 17/07/26.
+//
+//  UPDATE (24/09/26): each pet card can now expand in place to show
+//  compact Weight & Height growth charts (same data source as
+//  PetDetailsView's charts), so the user doesn't have to leave this
+//  screen — and lose the Start/Pause/Stop controls — just to check
+//  growth progress. Full PetDetailsView is still one tap away via the
+//  chevron button.
+//
+
+import SwiftUI
+import Charts
+
+struct MyAnimals: View {
+
+    @Environment(\.dismiss) var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+    @EnvironmentObject var petStore: PetStore
+
+    @StateObject private var timerManager = PetTimeActivityManager.shared
+
+    var body: some View {
+        ZStack {
+            screenBackground
+
+            VStack(spacing: 0) {
+                header
+
+                if petStore.pets.isEmpty {
+                    emptyState
+                } else {
+                    ScrollView(showsIndicators: false) {
+                        VStack(spacing: 16) {
+                            activePetsHeader
+
+                            ForEach(
+                                petStore.pets,
+                                id: \.objectID
+                            ) { pet in
+                                PetCompanionCard(
+                                    pet: pet,
+                                    timerManager: timerManager
+                                )
+                            }
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 20)
+                        .padding(.bottom, 110)
+                    }
+                }
+            }
+        }
+        .navigationBarBackButtonHidden(true)
+        .onAppear {
+            timerManager.refresh()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                timerManager.refresh()
+            }
+        }
+    }
+
+    // MARK: - Background
+
+    private var screenBackground: some View {
+        ZStack {
+            Color.appBackground
+                .ignoresSafeArea()
+
+            Circle()
+                .fill(Color.appAccent.opacity(0.14))
+                .frame(width: 270, height: 270)
+                .blur(radius: 45)
+                .offset(x: 170, y: -350)
+
+            Circle()
+                .fill(Color.appBrand.opacity(0.08))
+                .frame(width: 260, height: 260)
+                .blur(radius: 50)
+                .offset(x: -170, y: 400)
+        }
+    }
+
+    // MARK: - Header
+
+    private var header: some View {
+        HStack(spacing: 14) {
+
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(Color.appTextPrimary)
+                    .frame(width: 44, height: 44)
+                    .background(Color.appSurface)
+                    .clipShape(Circle())
+                    .overlay {
+                        Circle()
+                            .stroke(
+                                Color.appBorder,
+                                lineWidth: 1
+                            )
+                    }
+            }
+            .buttonStyle(.plain)
+
+            VStack(alignment: .leading, spacing: 3) {
+
+                Text("YOUR COMPANIONS")
+                    .font(.caption.weight(.bold))
+                    .tracking(1.3)
+                    .foregroundStyle(Color.appAccent)
+
+                Text("My Animals")
+                    .font(
+                        .system(
+                            size: 28,
+                            weight: .bold,
+                            design: .rounded
+                        )
+                    )
+                    .foregroundStyle(Color.appTextPrimary)
+            }
+
+            Spacer()
+
+            Image(systemName: "pawprint.fill")
+                .font(.title3.weight(.bold))
+                .foregroundStyle(Color.appAccent)
+                .frame(width: 44, height: 44)
+                .background(Color.appBlush)
+                .clipShape(Circle())
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 14)
+        .padding(.bottom, 8)
+    }
+
+    // MARK: - Active Pets Header
+
+    private var activePetsHeader: some View {
+        HStack {
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("MY PETS")
+                    .font(.caption.weight(.bold))
+                    .tracking(1.2)
+                    .foregroundStyle(Color.appAccent)
+
+                Text(
+                    "\(petStore.pets.count) "
+                    + (petStore.pets.count == 1 ? "companion" : "companions")
+                )
+                .font(
+                    .system(
+                        size: 17,
+                        weight: .bold,
+                        design: .rounded
+                    )
+                )
+                .foregroundStyle(Color.appTextPrimary)
+            }
+
+            Spacer()
+
+            Image(systemName: "heart.fill")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(Color.appAccent)
+                .frame(width: 34, height: 34)
+                .background(Color.appBlush)
+                .clipShape(Circle())
+        }
+        .padding(.horizontal, 4)
+    }
+
+    // MARK: - Empty State
+
+    private var emptyState: some View {
+        VStack(spacing: 18) {
+
+            Spacer()
+
+            ZStack {
+                Circle()
+                    .fill(Color.appBlush)
+                    .frame(width: 100, height: 100)
+
+                Image(systemName: "pawprint.fill")
+                    .font(.system(size: 42, weight: .bold))
+                    .foregroundStyle(Color.appAccent)
+            }
+
+            VStack(spacing: 7) {
+
+                Text("No pets added yet")
+                    .font(
+                        .system(
+                            size: 22,
+                            weight: .bold,
+                            design: .rounded
+                        )
+                    )
+                    .foregroundStyle(Color.appTextPrimary)
+
+                Text(
+                    "Add a pet from Pets List, then come back to see them here."
+                )
+                .font(.subheadline)
+                .foregroundStyle(Color.appTextSecondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(
+                    horizontal: false,
+                    vertical: true
+                )
+                .padding(.horizontal, 28)
+            }
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 20)
+    }
+}
+
+// MARK: - Growth Point (chart data model, scoped to this file)
+
+private struct GrowthPoint: Identifiable {
+    let id: UUID
+    let date: Date
+    let value: Double
+}
+
+// MARK: - Pet Companion Card
+// One card per pet: header (image, name, details, expand-graphs toggle,
+// chevron to full profile), an optional inline growth-chart section, and
+// the timer controls underneath — all in one place so the user never has
+// to leave MyAnimals to check on a pet's growth or run a live activity.
+
+private struct PetCompanionCard: View {
+
+    let pet: Pet
+    @ObservedObject var timerManager: PetTimeActivityManager
+
+    @State private var isExpanded = false
+
+    @FetchRequest private var weightEntries: FetchedResults<WeightEntry>
+    @FetchRequest private var heightEntries: FetchedResults<HeightEntry>
+
+    init(pet: Pet, timerManager: PetTimeActivityManager) {
+        self.pet = pet
+        self.timerManager = timerManager
+
+        _weightEntries = FetchRequest(
+            sortDescriptors: [
+                NSSortDescriptor(
+                    keyPath: \WeightEntry.date,
+                    ascending: true
+                )
+            ],
+            predicate: NSPredicate(
+                format: "pet == %@",
+                pet
+            ),
+            animation: .default
+        )
+
+        _heightEntries = FetchRequest(
+            sortDescriptors: [
+                NSSortDescriptor(
+                    keyPath: \HeightEntry.date,
+                    ascending: true
+                )
+            ],
+            predicate: NSPredicate(
+                format: "pet == %@",
+                pet
+            ),
+            animation: .default
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+
+            VStack(alignment: .leading, spacing: 0) {
+                cardHeader
+
+                if isExpanded {
+                    growthSection
+                        .padding(.top, 14)
+                        .transition(
+                            .opacity.combined(with: .move(edge: .top))
+                        )
+                }
+            }
+            .padding(15)
+            .background(Color.appSurface)
+            .clipShape(
+                RoundedRectangle(
+                    cornerRadius: 24,
+                    style: .continuous
+                )
+            )
+            .overlay {
+                RoundedRectangle(
+                    cornerRadius: 24,
+                    style: .continuous
+                )
+                .stroke(
+                    Color.appBorder.opacity(0.45),
+                    lineWidth: 1
+                )
+            }
+            .shadow(
+                color: Color.appElevatedShadow,
+                radius: 10,
+                y: 5
+            )
+
+            if let petID = pet.id?.uuidString {
+                timerControls(
+                    for: pet,
+                    petID: petID
+                )
+            }
+        }
+    }
+
+    // MARK: - Card Header
+
+    private var cardHeader: some View {
+        HStack(spacing: 14) {
+
+            petImage
+
+            VStack(alignment: .leading, spacing: 5) {
+
+                Text(pet.name ?? "Unnamed")
+                    .font(
+                        .system(
+                            size: 19,
+                            weight: .bold,
+                            design: .rounded
+                        )
+                    )
+                    .foregroundStyle(Color.appTextPrimary)
+
+                let details = [
+                    pet.species,
+                    pet.breed
+                ]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: " · ")
+
+                if !details.isEmpty {
+                    Text(details)
+                        .font(.subheadline)
+                        .foregroundStyle(Color.appTextSecondary)
+                        .lineLimit(1)
+                }
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        isExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(
+                            systemName: isExpanded
+                                ? "chevron.up"
+                                : "chart.xyaxis.line"
+                        )
+                        Text(
+                            isExpanded
+                                ? "Hide growth graphs"
+                                : "View growth graphs"
+                        )
+                    }
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(Color.appAccent)
+                }
+                .buttonStyle(.plain)
+            }
+
+            Spacer()
+
+            NavigationLink {
+                PetDetailsView(pet: pet)
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Color.appTextSecondary)
+                    .frame(width: 34, height: 34)
+                    .background(Color.appBackground)
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    // MARK: - Growth Section (inline, expandable)
+
+    private var growthSection: some View {
+        VStack(spacing: 12) {
+            miniChartCard(
+                title: "Weight",
+                unit: "kg",
+                icon: "scalemass.fill",
+                tint: Color.appBrand,
+                points: weightEntries.compactMap { entry in
+                    guard let date = entry.date else { return nil }
+                    return GrowthPoint(
+                        id: entry.id ?? UUID(),
+                        date: date,
+                        value: entry.valueKg
+                    )
+                }
+            )
+
+            miniChartCard(
+                title: "Height",
+                unit: "cm",
+                icon: "arrow.up.and.down",
+                tint: Color.appAccent,
+                points: heightEntries.compactMap { entry in
+                    guard let date = entry.date else { return nil }
+                    return GrowthPoint(
+                        id: entry.id ?? UUID(),
+                        date: date,
+                        value: entry.valueCm
+                    )
+                }
+            )
+        }
+    }
+
+    private func miniChartCard(
+        title: String,
+        unit: String,
+        icon: String,
+        tint: Color,
+        points: [GrowthPoint]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(tint)
+
+                Text("\(title) progress")
+                    .font(
+                        .system(
+                            size: 13,
+                            weight: .bold,
+                            design: .rounded
+                        )
+                    )
+                    .foregroundStyle(Color.appTextPrimary)
+
+                Spacer()
+
+                if let latest = points.last?.value {
+                    Text(String(format: "%.1f \(unit)", latest))
+                        .font(
+                            .system(
+                                size: 13,
+                                weight: .bold,
+                                design: .rounded
+                            )
+                        )
+                        .foregroundStyle(tint)
+                }
+            }
+
+            if points.isEmpty {
+                Text("No \(title.lowercased()) records yet")
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 18)
+            } else {
+                Chart(points) { point in
+                    LineMark(
+                        x: .value("Date", point.date),
+                        y: .value(unit, point.value)
+                    )
+                    .foregroundStyle(tint)
+                    .lineStyle(
+                        StrokeStyle(
+                            lineWidth: 2.5,
+                            lineCap: .round,
+                            lineJoin: .round
+                        )
+                    )
+                    .interpolationMethod(.catmullRom)
+
+                    PointMark(
+                        x: .value("Date", point.date),
+                        y: .value(unit, point.value)
+                    )
+                    .foregroundStyle(tint)
+                    .symbolSize(22)
+                }
+                .chartXAxis {
+                    AxisMarks(values: .automatic(desiredCount: 3)) { _ in
+                        AxisGridLine()
+                            .foregroundStyle(Color.appBorder.opacity(0.5))
+                        AxisValueLabel()
+                            .foregroundStyle(Color.appTextSecondary)
+                            .font(.caption2)
+                    }
+                }
+                .chartYAxis {
+                    AxisMarks { _ in
+                        AxisGridLine()
+                            .foregroundStyle(Color.appBorder.opacity(0.5))
+                        AxisValueLabel()
+                            .foregroundStyle(Color.appTextSecondary)
+                            .font(.caption2)
+                    }
+                }
+                .frame(height: 110)
+            }
+        }
+        .padding(12)
+        .background(Color.appBackground)
+        .clipShape(
+            RoundedRectangle(
+                cornerRadius: 16,
+                style: .continuous
+            )
+        )
+    }
+
+    // MARK: - Pet Image
+
+    @ViewBuilder
+    private var petImage: some View {
+
+        if let photoData = pet.photoData,
+           let uiImage = UIImage(data: photoData) {
+
+            Image(uiImage: uiImage)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 68, height: 68)
+                .clipShape(
+                    RoundedRectangle(
+                        cornerRadius: 20,
+                        style: .continuous
+                    )
+                )
+
+        } else {
+
+            ZStack {
+                LinearGradient(
+                    colors: [
+                        Color.appBrand,
+                        Color.appAccent
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+
+                Image(systemName: "pawprint.fill")
+                    .font(.title2.weight(.bold))
+                    .foregroundStyle(Color.appOnBrand)
+            }
+            .frame(width: 68, height: 68)
+            .clipShape(
+                RoundedRectangle(
+                    cornerRadius: 20,
+                    style: .continuous
+                )
+            )
+        }
+    }
+
+    // MARK: - Timer Controls
+
+    private func timerControls(
+        for pet: Pet,
+        petID: String
+    ) -> some View {
+
+        let timer = timerManager.timer(for: petID)
+        let canStart = timerManager.canStartTimer(for: petID)
+
+        return HStack(spacing: 8) {
+
+            timerButton(
+                title: "Start",
+                icon: "play.fill",
+                isProminent: true
+            ) {
+                timerManager.start(
+                    petID: petID,
+                    petName: pet.name ?? "Unnamed",
+                    breed: pet.breed ?? pet.species ?? ""
+                )
+            }
+            .disabled(!canStart)
+
+            timerButton(
+                title: timer?.isPaused == true
+                    ? "Resume"
+                    : "Pause",
+                icon: timer?.isPaused == true
+                    ? "play.fill"
+                    : "pause.fill",
+                isProminent: false
+            ) {
+                if timer?.isPaused == true {
+                    timerManager.resume(petID: petID)
+                } else {
+                    timerManager.pause(petID: petID)
+                }
+            }
+            .disabled(timer == nil)
+
+            timerButton(
+                title: "Stop",
+                icon: "stop.fill",
+                isProminent: false
+            ) {
+                timerManager.stop(petID: petID)
+            }
+            .disabled(timer == nil)
+
+            Spacer(minLength: 0)
+
+            if timerManager.timers.count >=
+                PetTimeActivityManager.maximumConcurrentActivities,
+               timer == nil {
+
+                Text("3 active")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Color.appTextSecondary)
+            }
+        }
+        .padding(.horizontal, 4)
+    }
+
+    // MARK: - Timer Button
+
+    private func timerButton(
+        title: String,
+        icon: String,
+        isProminent: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                Text(title)
+            }
+            .font(.caption.weight(.bold))
+            .foregroundStyle(
+                isProminent
+                ? Color.appOnBrand
+                : Color.appTextPrimary
+            )
+            .padding(.horizontal, 12)
+            .frame(height: 36)
+            .background(
+                isProminent
+                ? Color.appBrand
+                : Color.appSurface
+            )
+            .clipShape(Capsule())
+            .overlay {
+                if !isProminent {
+                    Capsule()
+                        .stroke(
+                            Color.appBorder,
+                            lineWidth: 1
+                        )
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+#Preview {
+    NavigationStack {
+        MyAnimals()
+            .environmentObject(
+                PetStore(
+                    context:
+                        PersistenceController
+                            .shared
+                            .container
+                            .viewContext
+                )
+            )
+    }
+}
+
+
+
+
+
+
+
+
+
+
+<==============================================================================================================================================================================>
+//
+//  ProfileView.swift
+//  Dr.Paw
+//
+//  Created by Adityasinh on 17/07/26.
+//
+
+import SwiftUI
+import PhotosUI
+
+struct ProfileScreenView: View {
+    
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var session: UserSession
+    @EnvironmentObject private var petStore: PetStore
+    @EnvironmentObject private var subscriptionManager: SubscriptionManager
+    
+    @State private var selectedPhoto: PhotosPickerItem?
+    
+    // MARK: - Theme
+    
+    private let screenBackground = Color.appBackground
+    private let cardBackground = Color.appSurface
+    private let titleColor = Color.appTextPrimary
+    private let subtitleColor = Color.appTextSecondary
+    private let accentColor = Color.appAccent
+    private let highlightColor = Color.appBrand
+    private let avatarPlaceholder = Color.appAccent.opacity(0.15)
+    private let iconTint = Color.appAccent
+    private let proGoldColor = Color(red: 0.83, green: 0.68, blue: 0.21)
+    
+    var body: some View {
+        NavigationStack {
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 22) {
+                    header
+                    identity
+                    statsCard
+                    collectionSection
+                    petsSection
+                    aboutSection
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
+                .padding(.bottom, 28)
+            }
+            .background(screenBackground.ignoresSafeArea())
+            .navigationBarBackButtonHidden(true)
+            .toolbar(.hidden, for: .navigationBar)
+            .onChange(of: selectedPhoto) { _, newPhoto in
+                guard let newPhoto else { return }
+                
+                Task {
+                    if let data = try? await newPhoto.loadTransferable(type: Data.self) {
+                        session.profileImageData = data
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Header
+    
+    private var header: some View {
+        HStack {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "arrow.left")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(titleColor)
+                    .frame(width: 44, height: 44)
+                    .background(cardBackground)
+                    .clipShape(Circle())
+                    .overlay {
+                        Circle()
+                            .stroke(Color.appBorder, lineWidth: 1)
+                    }
+            }
+            
+            Spacer()
+            
+            Text("Profile")
+                .font(.system(size: 34, weight: .bold))
+                .foregroundStyle(titleColor)
+                .padding(.top, 4)
+            
+            Spacer()
+            
+            Color.clear
+                .frame(width: 44, height: 44)
+        }
+        .padding(.horizontal)
+        .padding(.top, 8)
+    }
+    
+    // MARK: - Identity
+    
+    private var identity: some View {
+        VStack(spacing: 12) {
+            ZStack(alignment: .bottomTrailing) {
+                ZStack(alignment: .topTrailing) {
+                    profileImage
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 108, height: 108)
+                        .clipShape(Circle())
+                        .overlay {
+                            Circle()
+                                .stroke(
+                                    subscriptionManager.isPro ? proGoldColor : highlightColor,
+                                    lineWidth: 3
+                                )
+                        }
+                        .shadow(
+                            color: accentColor.opacity(0.18),
+                            radius: 12,
+                            y: 6
+                        )
+                    
+                    if subscriptionManager.isPro {
+                        proCrownBadge
+                    }
+                }
+                
+                PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                    Image(systemName: "pencil")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(accentColor)
+                        .padding(8)
+                        .background(cardBackground)
+                        .clipShape(Circle())
+                        .overlay {
+                            Circle()
+                                .stroke(Color.appBorder, lineWidth: 1)
+                        }
+                        .shadow(
+                            color: Color.appElevatedShadow,
+                            radius: 4,
+                            y: 2
+                        )
+                }
+            }
+            
+            VStack(spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(
+                        session.nickname.isEmpty
+                        ? "Pet Parent"
+                        : session.nickname
+                    )
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(titleColor)
+                    
+                    if subscriptionManager.isPro {
+                        proBadgeChip
+                    }
+                }
+                
+                Text(
+                    session.email.isEmpty
+                    ? "Your pet care companion"
+                    : session.email
+                )
+                .font(.subheadline)
+                .foregroundStyle(subtitleColor)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 4)
+    }
+    
+    // MARK: - Pro Badges
+    
+    private var proCrownBadge: some View {
+        Image(systemName: "crown.fill")
+            .font(.system(size: 11, weight: .bold))
+            .foregroundStyle(.white)
+            .padding(6)
+            .background(proGoldColor)
+            .clipShape(Circle())
+            .overlay {
+                Circle()
+                    .stroke(cardBackground, lineWidth: 2)
+            }
+            .shadow(
+                color: Color.appElevatedShadow,
+                radius: 3,
+                y: 1
+            )
+            .offset(x: 4, y: -4)
+    }
+    
+    private var proBadgeChip: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "crown.fill")
+                .font(.system(size: 10, weight: .bold))
+            
+            Text("PRO")
+                .font(.system(size: 12, weight: .bold))
+                .tracking(0.4)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(proGoldColor)
+        .clipShape(Capsule())
+    }
+    
+    // MARK: - Stats
+    
+    private var statsCard: some View {
+        HStack(spacing: 0) {
+            statCell(
+                icon: "pawprint.fill",
+                value: "\(petStore.pets.count)",
+                label: "Pets"
+            )
+            
+            Divider()
+                .frame(height: 44)
+            
+            statCell(
+                icon: "bell.fill",
+                value: "—",
+                label: "Reminders"
+            )
+            
+            Divider()
+                .frame(height: 44)
+            
+            statCell(
+                icon: "camera.viewfinder",
+                value: "—",
+                label: "Scans"
+            )
+        }
+        .padding(.vertical, 16)
+        .background(cardBackground)
+        .clipShape(
+            RoundedRectangle(
+                cornerRadius: 22,
+                style: .continuous
+            )
+        )
+        .overlay {
+            RoundedRectangle(
+                cornerRadius: 22,
+                style: .continuous
+            )
+            .stroke(Color.appBorder, lineWidth: 1)
+        }
+    }
+    
+    private func statCell(
+        icon: String,
+        value: String,
+        label: String
+    ) -> some View {
+        VStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(iconTint)
+            
+            Text(value)
+                .font(.system(size: 20, weight: .bold))
+                .foregroundStyle(highlightColor)
+            
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(subtitleColor)
+        }
+        .frame(maxWidth: .infinity)
+    }
+    
+    // MARK: - Collection
+    
+    private var collectionSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionLabel(
+                "YOUR CARE",
+                systemImage: "folder.fill"
+            )
+            
+            VStack(spacing: 0) {
+                ProfileCollectionRow(
+                    icon: "camera.viewfinder",
+                    title: "Scan History",
+                    count: nil,
+                    showDivider: true,
+                    accentColor: iconTint,
+                    titleColor: titleColor,
+                    subtitleColor: subtitleColor,
+                    cardBackground: cardBackground
+                ) {
+                    ScanHistory()
+                }
+            }
+            .background(cardBackground)
+            .clipShape(
+                RoundedRectangle(
+                    cornerRadius: 22,
+                    style: .continuous
+                )
+            )
+            .overlay {
+                RoundedRectangle(
+                    cornerRadius: 22,
+                    style: .continuous
+                )
+                .stroke(Color.appBorder, lineWidth: 1)
+            }
+        }
+    }
+    
+    // MARK: - Pets
+    
+    private var petsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionLabel(
+                "YOUR PETS",
+                systemImage: "heart.fill"
+            )
+            
+            if petStore.pets.isEmpty {
+                Text("Add a pet from Pets List to see them here.")
+                    .font(.subheadline)
+                    .foregroundStyle(subtitleColor)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(18)
+                    .background(cardBackground)
+                    .clipShape(
+                        RoundedRectangle(
+                            cornerRadius: 22,
+                            style: .continuous
+                        )
+                    )
+                    .overlay {
+                        RoundedRectangle(
+                            cornerRadius: 22,
+                            style: .continuous
+                        )
+                        .stroke(Color.appBorder, lineWidth: 1)
+                    }
+            } else {
+                VStack(spacing: 12) {
+                    ForEach(
+                        petStore.pets,
+                        id: \.objectID
+                    ) { pet in
+                        NavigationLink {
+                            PetDetailsView(pet: pet)
+                        } label: {
+                            petCard(pet)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+    
+    private func petCard(_ pet: Pet) -> some View {
+        HStack(spacing: 14) {
+            if let photoData = pet.photoData,
+               let uiImage = UIImage(data: photoData) {
+                
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 52, height: 52)
+                    .clipShape(
+                        RoundedRectangle(
+                            cornerRadius: 12,
+                            style: .continuous
+                        )
+                    )
+            } else {
+                ZStack {
+                    RoundedRectangle(
+                        cornerRadius: 12,
+                        style: .continuous
+                    )
+                    .fill(avatarPlaceholder)
+                    .frame(width: 52, height: 52)
+                    
+                    Image(systemName: "pawprint.fill")
+                        .foregroundStyle(accentColor)
+                }
+            }
+            
+            VStack(alignment: .leading, spacing: 3) {
+                Text(pet.name ?? "Unnamed")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(titleColor)
+                
+                Text(
+                    [pet.species, pet.breed]
+                        .compactMap { $0 }
+                        .filter { !$0.isEmpty }
+                        .joined(separator: " · ")
+                )
+                .font(.caption)
+                .foregroundStyle(subtitleColor)
+            }
+            
+            Spacer()
+            
+            if pet.isSelected {
+                Image(systemName: "heart.fill")
+                    .foregroundStyle(highlightColor)
+            }
+            
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(accentColor.opacity(0.7))
+        }
+        .padding(12)
+        .background(cardBackground)
+        .clipShape(
+            RoundedRectangle(
+                cornerRadius: 18,
+                style: .continuous
+            )
+        )
+        .overlay {
+            RoundedRectangle(
+                cornerRadius: 18,
+                style: .continuous
+            )
+            .stroke(Color.appBorder, lineWidth: 1)
+        }
+    }
+    
+    // MARK: - Section Label
+    
+    private func sectionLabel(
+        _ text: String,
+        systemImage: String
+    ) -> some View {
+        Label(text, systemImage: systemImage)
+            .font(.system(size: 12, weight: .semibold))
+            .tracking(0.6)
+            .foregroundStyle(accentColor)
+            .padding(.leading, 4)
+    }
+    
+    // MARK: - Profile Image
+    
+    private var profileImage: Image {
+        if let image = UIImage(
+            data: session.profileImageData
+        ),
+           !session.profileImageData.isEmpty {
+            return Image(uiImage: image)
+        }
+        
+        return Image(systemName: "person.crop.circle.fill")
+    }
+    
+    // MARK: - About
+    
+    private var aboutSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionLabel(
+                "ABOUT",
+                systemImage: "info.circle.fill"
+            )
+            
+            VStack(spacing: 0) {
+                ProfileSettingsRow(
+                    icon: "info.circle.fill",
+                    title: "About Dr. Paws",
+                    showDivider: false,
+                    accentColor: iconTint,
+                    titleColor: titleColor
+                ) {
+                    About()
+                }
+            }
+            .background(cardBackground)
+            .clipShape(
+                RoundedRectangle(
+                    cornerRadius: 22,
+                    style: .continuous
+                )
+            )
+            .overlay {
+                RoundedRectangle(
+                    cornerRadius: 22,
+                    style: .continuous
+                )
+                .stroke(Color.appBorder, lineWidth: 1)
+            }
+        }
+    }
+}
+
+// MARK: - Collection Row
+
+private struct ProfileCollectionRow<Destination: View>: View {
+    
+    let icon: String
+    let title: String
+    let count: Int?
+    var showDivider: Bool
+    
+    let accentColor: Color
+    let titleColor: Color
+    let subtitleColor: Color
+    let cardBackground: Color
+    
+    @ViewBuilder let destination: () -> Destination
+    
+    var body: some View {
+        NavigationLink(destination: destination()) {
+            ProfileCollectionRowLabel(
+                icon: icon,
+                title: title,
+                count: count,
+                showDivider: showDivider,
+                accentColor: accentColor,
+                titleColor: titleColor,
+                subtitleColor: subtitleColor
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct ProfileCollectionRowLabel: View {
+    
+    let icon: String
+    let title: String
+    let count: Int?
+    var showDivider: Bool
+    
+    let accentColor: Color
+    let titleColor: Color
+    let subtitleColor: Color
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                Image(systemName: icon)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(accentColor)
+                    .frame(width: 28)
+                
+                Text(title)
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(titleColor)
+                
+                Spacer()
+                
+                if let count {
+                    Text("\(count)")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(subtitleColor)
+                }
+                
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(accentColor.opacity(0.7))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            
+            if showDivider {
+                Divider()
+                    .padding(.leading, 58)
+            }
+        }
+    }
+}
+
+// MARK: - About / Settings Row
+
+private struct ProfileSettingsRow<Destination: View>: View {
+    
+    let icon: String
+    let title: String
+    var showDivider: Bool
+    
+    let accentColor: Color
+    let titleColor: Color
+    
+    @ViewBuilder let destination: () -> Destination
+    
+    var body: some View {
+        NavigationLink(destination: destination()) {
+            VStack(spacing: 0) {
+                HStack(spacing: 14) {
+                    Image(systemName: icon)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(accentColor)
+                        .frame(width: 28)
+                    
+                    Text(title)
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(titleColor)
+                    
+                    Spacer()
+                    
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(accentColor.opacity(0.7))
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                
+                if showDivider {
+                    Divider()
+                        .padding(.leading, 58)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Helper: Rounded Corners
+
+struct RoundedCorner: Shape {
+    
+    var radius: CGFloat = .infinity
+    var corners: UIRectCorner = .allCorners
+    
+    func path(in rect: CGRect) -> Path {
+        let path = UIBezierPath(
+            roundedRect: rect,
+            byRoundingCorners: corners,
+            cornerRadii: CGSize(
+                width: radius,
+                height: radius
+            )
+        )
+        
+        return Path(path.cgPath)
+    }
+}
+
+// MARK: - Helper: Native Share Sheet
+
+struct ActivityShareSheet: UIViewControllerRepresentable {
+    
+    let items: [Any]
+    
+    func makeUIViewController(
+        context: Context
+    ) -> UIActivityViewController {
+        UIActivityViewController(
+            activityItems: items,
+            applicationActivities: nil
+        )
+    }
+    
+    func updateUIViewController(
+        _ uiViewController: UIActivityViewController,
+        context: Context
+    ) {}
+}
+
+#Preview {
+    NavigationStack {
+        ProfileScreenView()
+            .environmentObject(UserSession())
+            .environmentObject(
+                PetStore(
+                    context: PersistenceController.shared.container.viewContext
+                )
+            )
+            .environmentObject(SubscriptionManager())
+    }
+}
+
+
+
+
+
+<==============================================================================================================================================================================>
+//
+//  AppIntent.swift
+//  DrPawWidget
+//
+//  FIX (24/09/26): Pause/Resume/Stop for the Pet Time Live Activity were
+//  conforming to plain `AppIntent`. That's correct for the ordinary
+//  WidgetKit widget buttons (Food/Walk) below, but buttons attached to a
+//  Live Activity (Dynamic Island / Lock Screen) need `LiveActivityIntent`
+//  instead — without it, the system isn't guaranteed to actually run
+//  perform() when tapped from those surfaces, which is why the countdown
+//  kept ticking regardless of what was tapped. LiveActivityIntent is a
+//  pure marker protocol on top of AppIntent, so no other code changes.
+//
+
+import AppIntents
+import ActivityKit
+import WidgetKit
+
+struct PetEntity: AppEntity, Hashable {
+    let id: String
+    let name: String
+
+    static var typeDisplayRepresentation: TypeDisplayRepresentation {
+        "Pet"
+    }
+
+    var displayRepresentation: DisplayRepresentation {
+        DisplayRepresentation(title: "\(name)")
+    }
+
+    static var defaultQuery = PetQuery()
+}
+
+struct PetQuery: EntityQuery {
+    func entities(for identifiers: [PetEntity.ID]) async throws -> [PetEntity] {
+        WidgetSharedStore.loadPets()
+            .filter { identifiers.contains($0.id) }
+            .map { PetEntity(id: $0.id, name: $0.name) }
+    }
+
+    func suggestedEntities() async throws -> [PetEntity] {
+        let pets = WidgetSharedStore.loadPets()
+        if pets.isEmpty {
+            return [PetEntity(id: "placeholder", name: "Add a pet in Dr. Paws")]
+        }
+        return pets.map { PetEntity(id: $0.id, name: $0.name) }
+    }
+
+    func defaultResult() async -> PetEntity? {
+        try? await suggestedEntities().first
+    }
+}
+
+struct FoodWalkConfigurationIntent: WidgetConfigurationIntent {
+    static var title: LocalizedStringResource { "Food & Walk" }
+    static var description: IntentDescription {
+        "Twice-daily food and walk reminder for a pet."
+    }
+
+    @Parameter(title: "Pet")
+    var pet: PetEntity?
+}
+
+struct MedicalVisitConfigurationIntent: WidgetConfigurationIntent {
+    static var title: LocalizedStringResource { "Medical Visit" }
+    static var description: IntentDescription {
+        "Days remaining until the next checkup or vaccination."
+    }
+
+    @Parameter(title: "Pet")
+    var pet: PetEntity?
+}
+
+struct CompleteFoodIntent: AppIntent {
+    static var title: LocalizedStringResource = "Mark food complete"
+    static var openAppWhenRun = false
+
+    @Parameter(title: "Pet ID") var petID: String
+
+    init() {}
+
+    init(petID: String) {
+        self.petID = petID
+    }
+
+    func perform() async throws -> some IntentResult {
+        WidgetSharedStore.completeFoodWalkTask(.food, petID: petID)
+        return .result()
+    }
+}
+
+struct CompleteWalkIntent: AppIntent {
+    static var title: LocalizedStringResource = "Mark walk complete"
+    static var openAppWhenRun = false
+
+    @Parameter(title: "Pet ID") var petID: String
+
+    init() {}
+
+    init(petID: String) {
+        self.petID = petID
+    }
+
+    func perform() async throws -> some IntentResult {
+        WidgetSharedStore.completeFoodWalkTask(.walk, petID: petID)
+        return .result()
+    }
+}
+
+struct PausePetTimeIntent: LiveActivityIntent {
+    static var title: LocalizedStringResource = "Pause pet time"
+    static var openAppWhenRun = false
+
+    @Parameter(title: "Activity ID") var activityID: String
+
+    init() {}
+
+    init(activityID: String) {
+        self.activityID = activityID
+    }
+
+    func perform() async throws -> some IntentResult {
+        guard let activity = Activity<PetTimeAttributes>.activities.first(where: { $0.id == activityID }),
+              !activity.content.state.isPaused else {
+            return .result()
+        }
+
+        let remaining = max(activity.content.state.endDate.timeIntervalSinceNow, 0)
+        let state = PetTimeAttributes.ContentState(
+            endDate: Date(),
+            isPaused: true,
+            pausedRemaining: remaining
+        )
+        await activity.update(ActivityContent(state: state, staleDate: nil))
+        return .result()
+    }
+}
+
+struct ResumePetTimeIntent: LiveActivityIntent {
+    static var title: LocalizedStringResource = "Resume pet time"
+    static var openAppWhenRun = false
+
+    @Parameter(title: "Activity ID") var activityID: String
+
+    init() {}
+
+    init(activityID: String) {
+        self.activityID = activityID
+    }
+
+    func perform() async throws -> some IntentResult {
+        guard let activity = Activity<PetTimeAttributes>.activities.first(where: { $0.id == activityID }),
+              activity.content.state.isPaused else {
+            return .result()
+        }
+
+        let end = Date().addingTimeInterval(activity.content.state.pausedRemaining)
+        let state = PetTimeAttributes.ContentState(endDate: end, isPaused: false, pausedRemaining: 0)
+        await activity.update(ActivityContent(state: state, staleDate: end))
+        return .result()
+    }
+}
+
+struct StopPetTimeIntent: LiveActivityIntent {
+    static var title: LocalizedStringResource = "Stop pet time"
+    static var openAppWhenRun = false
+
+    @Parameter(title: "Activity ID") var activityID: String
+
+    init() {}
+
+    init(activityID: String) {
+        self.activityID = activityID
+    }
+
+    func perform() async throws -> some IntentResult {
+        guard let activity = Activity<PetTimeAttributes>.activities.first(where: { $0.id == activityID }) else {
+            return .result()
+        }
+        await activity.end(nil, dismissalPolicy: .immediate)
+        return .result()
+    }
+}
